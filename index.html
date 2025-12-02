@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Rubik's Cube Demo</title>
+    <style>
+        .button {
+            position: absolute;
+            left: 4%;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="c" style="width: 100%;"></canvas>
+    <button id="random" class="button" style="top: 5%">随机</button>
+    <button id="reset" class="button" style="top: 12%">重置</button>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import Cube from 'https://cdn.jsdelivr.net/npm/cubejs@1.3.2/+esm';
+
+        const canvas = document.querySelector('#c');
+        const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
+        const camera = initCamera();
+        const scene = initScene();
+        const controls = initControls();
+        const raycaster = new THREE.Raycaster();
+
+        // 块间隙
+        const GAP = 0.02;
+        const BLOCK_SIZE = 1 - GAP;
+        // 魔方阶数
+        const N = 3;
+        // n 阶小块边长
+        const LEN = order(N);
+        // 颜色：红（R），橙（L），白（U），黄（D），绿（B），蓝（F）
+        const COLORS = ["#fb3636", "#ff9351", "#ffffff", "#fade70", "#51acfa", "#9de16f"];
+        const CUBE = new THREE.Group();
+        // 旋转指令缓存
+        const COMMAND_MAP = new Map();
+        // 鼠标点击的 mesh
+        let selectMesh = null;
+
+        // 旋转中标记
+        let rotating = false;
+        // 旋转定时器
+        let interval = null;
+        // 动画时长（毫秒）
+        const duration = 300;
+        let startTime = 0;
+        let startQuat;
+        let endQuat;
+        let rotationGroup;
+        // 旋转方向
+        let direction;
+
+        // 鼠标点击面的法向量
+        let normalize;
+        // 拖拽开始&结束
+        const startDrag = new THREE.Vector2();
+        const endDrag = new THREE.Vector2();
+        let startPoint = new THREE.Vector3();
+        let endPoint = new THREE.Vector3();
+
+        // 六个面的法向量
+        const XLine = new THREE.Vector3(1, 0, 0);
+        const XLineAd = new THREE.Vector3(-1, 0, 0);
+        const YLine = new THREE.Vector3(0, 1, 0);
+        const YLineAd = new THREE.Vector3(0, -1, 0);
+        const ZLine = new THREE.Vector3(0, 0, 1);
+        const ZLineAd = new THREE.Vector3(0, 0, -1);
+
+        // 旋转变换规则
+        const ROTATION_RULES = {
+            U: { axis: 'y', '1': { U: 'U', D: 'D', F: 'R', R: 'B', B: 'L', L: 'F' }, '-1': { U: 'U', D: 'D', R: 'F', B: 'R', L: 'B', F: 'L' } },
+            D: { axis: 'y', '1': { U: 'U', D: 'D', F: 'L', L: 'B', B: 'R', R: 'F' }, '-1': { U: 'U', D: 'D', L: 'F', B: 'L', R: 'B', F: 'R' } },
+            F: { axis: 'z', '1': { F: 'F', B: 'B', U: 'L', L: 'D', D: 'R', R: 'U' }, '-1': { F: 'F', B: 'B', L: 'U', D: 'L', R: 'D', U: 'R' } },
+            B: { axis: 'z', '1': { B: 'B', F: 'F', U: 'R', R: 'D', D: 'L', L: 'U' }, '-1': { B: 'B', F: 'F', R: 'U', D: 'R', L: 'D', U: 'L' } },
+            L: { axis: 'x', '1': { L: 'L', R: 'R', U: 'F', F: 'D', D: 'B', B: 'U' }, '-1': { L: 'L', R: 'R', F: 'U', D: 'F', B: 'D', U: 'B' } },
+            R: { axis: 'x', '1': { R: 'R', L: 'L', U: 'B', B: 'D', D: 'F', F: 'U' }, '-1': { R: 'R', L: 'L', B: 'U', D: 'B', F: 'D', U: 'F' } },
+            M: { axis: 'x', '1': { U: 'F', F: 'D', D: 'B', B: 'U' }, '-1': { F: 'U', D: 'F', B: 'D', B: 'U' } },
+            E: { axis: 'y', '1': { F: 'L', L: 'B', B: 'R', R: 'F' }, '-1': { D: 'L', B: 'L', R: 'B', F: 'R' } },
+            S: { axis: 'z', '1': { U: 'L', L: 'D', D: 'R', R: 'U' }, '-1': { L: 'U', D: 'L', R: 'D', U: 'R' } }
+        };
+
+
+        init();
+
+        function init() {
+            initCommand();
+
+            createCube();
+            requestAnimationFrame(render);
+
+            // 初始化求解器(同步)  
+            Cube.initSolver();
+
+            document.getElementById("random").addEventListener("click", randomRotate);
+            document.getElementById("reset").addEventListener("click", resetCube);
+            document.getElementById("random").addEventListener("touchstart", randomRotate);
+            document.getElementById("reset").addEventListener("touchstart", resetCube);
+        }
+
+        function initCamera() {
+            // 定义视锥
+            const fov = 75;
+            const aspect = 1; // the canvas default
+            const near = 0.1;
+            const far = 10;
+            const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+            // 摄像机默认指向Z轴负方向
+            camera.position.set(4, 4, 6);
+
+            return camera;
+        }
+
+        function initControls() {
+            // 围绕某一个点旋转控制相机
+            const controls = new OrbitControls(camera, canvas);
+            controls.target.set(0, 0, 0);
+            // 最小缩放（相机离目标点最近距离，视觉放大到极限）
+            controls.minDistance = 5;
+            // 最大缩放（相机离目标点最远距离，视觉缩小到极限）
+            controls.maxDistance = 8;
+            controls.update();
+
+            return controls;
+        }
+
+        function initScene() {
+            // 场景
+            const scene = new THREE.Scene();
+            // 光照
+            const color = 0xFFFFFF;
+            const intensity = 1;
+            const light = new THREE.AmbientLight(color, intensity);
+            scene.add(light);
+
+            return scene;
+        }
+
+        function createCube() {
+            let materials = [];
+            for (let color of COLORS) {
+                // 材质
+                const material = new THREE.MeshPhongMaterial({ color: color });
+                materials.push(material);
+            }
+
+            // 几何体
+            const geometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+            for (let x = -LEN; x <= LEN; x++) {
+                for (let y = -LEN; y <= LEN; y++) {
+                    for (let z = -LEN; z <= LEN; z++) {
+                        // 奇数阶跳过中心
+                        if (LEN % 2 !== 0 && x === 0 && y === 0 && z === 0) continue;
+                        // 网格
+                        const cubelet = new THREE.Mesh(geometry, materials);
+                        cubelet.position.set(x, y, z);
+                        // 标记旋转影响的层（获取 meshGroup）
+                        cubelet.userData.rotationMark = {};
+                        // 每个面的状态标记
+                        cubelet.userData.facelet = {};
+
+                        // 对最外面的 mesh 进行分类
+                        setCubeMark(cubelet, true);
+                        CUBE.add(cubelet);
+                    }
+                }
+            }
+            scene.add(CUBE);
+        }
+
+        /**
+         * n 阶边长通用公式
+         */
+        function order(num) {
+            return (num - 1) / 2;
+        }
+
+        /**
+         * 初始化旋转指令
+         * cubejs 没有中间层的旋转
+         */
+        function initCommand() {
+            // three.js 是根据右手坐标系确定顺时针方向，角度正数-逆时针，角度负数-顺时针
+            // cubejs 定义的顺时针是从每个面看，所以 L B D 的角度方向要相反
+            COMMAND_MAP.set("R", { xyz: 'x', dir: -1, mark: 'R' });
+            COMMAND_MAP.set("R'", { xyz: 'x', dir: 1, mark: 'R' });
+            COMMAND_MAP.set("L", { xyz: 'x', dir: 1, mark: 'L' });
+            COMMAND_MAP.set("L'", { xyz: 'x', dir: -1, mark: 'L' });
+            COMMAND_MAP.set("U", { xyz: 'y', dir: -1, mark: 'U' });
+            COMMAND_MAP.set("U'", { xyz: 'y', dir: 1, mark: 'U' });
+            COMMAND_MAP.set("D", { xyz: 'y', dir: 1, mark: 'D' });
+            COMMAND_MAP.set("D'", { xyz: 'y', dir: -1, mark: 'D' });
+            COMMAND_MAP.set("F", { xyz: 'z', dir: -1, mark: 'F' });
+            COMMAND_MAP.set("F'", { xyz: 'z', dir: 1, mark: 'F' });
+            COMMAND_MAP.set("B", { xyz: 'z', dir: 1, mark: 'B' });
+            COMMAND_MAP.set("B'", { xyz: 'z', dir: -1, mark: 'B' });
+        }
+
+        /**
+         * 响应式渲染
+         */
+        function render() {
+            if (resizeRendererToDisplaySize(renderer)) {
+                const canvas = renderer.domElement;
+                camera.aspect = canvas.clientWidth / canvas.clientHeight;
+                camera.updateProjectionMatrix();
+            }
+
+            renderer.render(scene, camera);
+
+            requestAnimationFrame(render);
+        }
+
+        function resizeRendererToDisplaySize(renderer) {
+            const canvas = renderer.domElement;
+            const width = canvas.clientWidth;
+            const height = canvas.clientHeight;
+            const needResize = canvas.width !== width || canvas.height !== height;
+            if (needResize) {
+                renderer.setSize(width, height, false);
+            }
+
+            return needResize;
+        }
+
+        /**
+         * 根据旋转轴标记影响旋转的 mesh
+         * init 第一次初始化，生成初始 facelet 标记
+         */
+        function setCubeMark(mesh, init) {
+            if (mesh.position.x === LEN) {
+                mesh.userData.rotationMark.x = 'R';
+                if (init) mesh.userData.facelet.x = 'R';
+            } else if (mesh.position.x === -LEN) {
+                mesh.userData.rotationMark.x = 'L';
+                if (init) mesh.userData.facelet.x = 'L';
+            } else {
+                mesh.userData.rotationMark.x = (N > 3) ? 'M' + Math.abs(mesh.position.x - LEN) : 'M';
+                if (init) mesh.userData.facelet.x = 'M';
+            }
+
+            if (mesh.position.y === LEN) {
+                mesh.userData.rotationMark.y = 'U';
+                if (init) mesh.userData.facelet.y = 'U';
+            } else if (mesh.position.y === -LEN) {
+                mesh.userData.rotationMark.y = 'D';
+                if (init) mesh.userData.facelet.y = 'D';
+            } else {
+                mesh.userData.rotationMark.y = (N > 3) ? 'E' + Math.abs(mesh.position.y - LEN) : 'E';
+                if (init) mesh.userData.facelet.y = 'E';
+            }
+
+            if (mesh.position.z === LEN) {
+                mesh.userData.rotationMark.z = 'F';
+                if (init) mesh.userData.facelet.z = 'F';
+            } else if (mesh.position.z === -LEN) {
+                mesh.userData.rotationMark.z = 'B';
+                if (init) mesh.userData.facelet.z = 'B';
+            } else {
+                mesh.userData.rotationMark.z = (N > 3) ? 'S' + Math.abs(mesh.position.z - LEN) : 'S';
+                if (init) mesh.userData.facelet.z = 'S';
+            }
+        }
+
+        /**
+         * 旋转后按照规则更新 mesh 的 facelet 标记
+         */
+        function updateFacelet(mesh, xyz, dir) {
+            let mark = mesh.userData.rotationMark[xyz];
+            mark = (mark.length === 1) ? mark : mark[0];
+            let facelet = mesh.userData.facelet[xyz];
+            if (facelet) {
+                // 用旋转后的下一个标记覆盖
+                facelet = ROTATION_RULES[mark][dir][facelet];
+            }
+
+            // 绕 x 旋转 => z 和 y 互换 
+            // 绕 y 旋转 => x 和 z 互换
+            // 绕 z 旋转 => x 和 y 互换
+            switch (xyz) {
+                case 'x': {
+                    let temp = mesh.userData.facelet['z'];
+                    mesh.userData.facelet['z'] = mesh.userData.facelet['y'];
+                    mesh.userData.facelet['y'] = temp;
+                    break;
+                }
+                case 'y': {
+                    let temp = mesh.userData.facelet['x'];
+                    mesh.userData.facelet['x'] = mesh.userData.facelet['z'];
+                    mesh.userData.facelet['z'] = temp;
+                    break;
+                }
+                case 'z': {
+                    let temp = mesh.userData.facelet['y'];
+                    mesh.userData.facelet['y'] = mesh.userData.facelet['x'];
+                    mesh.userData.facelet['x'] = temp;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        /**
+         * 获取旋转轴方向
+         */
+        function getDirection(vector3) {
+            let direction;
+            // 判断差向量和x、y、z轴的夹角
+            let xAngle = vector3.angleTo(XLine);
+            let xAngleAd = vector3.angleTo(XLineAd);
+            let yAngle = vector3.angleTo(YLine);
+            let yAngleAd = vector3.angleTo(YLineAd);
+            let zAngle = vector3.angleTo(ZLine);
+            let zAngleAd = vector3.angleTo(ZLineAd);
+            // 最小夹角
+            let minAngle = Math.min(xAngle, xAngleAd, yAngle, yAngleAd, zAngle, zAngleAd);
+            switch (minAngle) {
+                case xAngle:
+                    direction = 0;  // 向x轴正方向旋转90度（还要区分是绕z轴还是绕y轴）
+                    if (normalize.equals(YLine)) {
+                        direction = direction + 0.1;  // 绕z轴顺时针
+                    } else if (normalize.equals(YLineAd)) {
+                        direction = direction + 0.2;  // 绕z轴逆时针
+                    } else if (normalize.equals(ZLine)) {
+                        direction = direction + 0.3;  // 绕y轴逆时针
+                    } else {
+                        direction = direction + 0.4;  // 绕y轴顺时针
+                    }
+                    break;
+                case xAngleAd:
+                    direction = 1;  // 向x轴反方向旋转90度
+                    if (normalize.equals(YLine)) {
+                        direction = direction + 0.1;  // 绕z轴逆时针
+                    } else if (normalize.equals(YLineAd)) {
+                        direction = direction + 0.2;  // 绕z轴顺时针
+                    } else if (normalize.equals(ZLine)) {
+                        direction = direction + 0.3;  // 绕y轴顺时针
+                    } else {
+                        direction = direction + 0.4;  // 绕y轴逆时针
+                    }
+                    break;
+                case yAngle:
+                    direction = 2;  // 向y轴正方向旋转90度
+                    if (normalize.equals(ZLine)) {
+                        direction = direction + 0.1;  // 绕x轴顺时针
+                    } else if (normalize.equals(ZLineAd)) {
+                        direction = direction + 0.2;  // 绕x轴逆时针
+                    } else if (normalize.equals(XLine)) {
+                        direction = direction + 0.3;  // 绕z轴逆时针
+                    } else {
+                        direction = direction + 0.4;  // 绕z轴顺时针
+                    }
+                    break;
+                case yAngleAd:
+                    direction = 3;  // 向y轴反方向旋转90度
+                    if (normalize.equals(ZLine)) {
+                        direction = direction + 0.1;  // 绕x轴逆时针
+                    } else if (normalize.equals(ZLineAd)) {
+                        direction = direction + 0.2;  // 绕x轴顺时针
+                    } else if (normalize.equals(XLine)) {
+                        direction = direction + 0.3;  // 绕z轴顺时针
+                    } else {
+                        direction = direction + 0.4;  // 绕z轴逆时针
+                    }
+                    break;
+                case zAngle:
+                    direction = 4;  // 向z轴正方向旋转90度
+                    if (normalize.equals(YLine)) {
+                        direction = direction + 0.1;  // 绕x轴逆时针
+                    } else if (normalize.equals(YLineAd)) {
+                        direction = direction + 0.2;  // 绕x轴顺时针
+                    } else if (normalize.equals(XLine)) {
+                        direction = direction + 0.3;  // 绕y轴顺时针
+                    } else {
+                        direction = direction + 0.4;  // 绕y轴逆时针
+                    }
+                    break;
+                case zAngleAd:
+                    direction = 5;  // 向z轴反方向旋转90度
+                    if (normalize.equals(YLine)) {
+                        direction = direction + 0.1;  // 绕x轴顺时针
+                    } else if (normalize.equals(YLineAd)) {
+                        direction = direction + 0.2;  // 绕x轴逆时针
+                    } else if (normalize.equals(XLine)) {
+                        direction = direction + 0.3;  // 绕y轴逆时针
+                    } else {
+                        direction = direction + 0.4;  // 绕y轴顺时针
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return direction;
+        }
+
+        /**
+         * 根据 mark 和 旋转轴方向
+         * 找出需要旋转的 meshGroup 并执行旋转
+         */
+        function findWhichOperation(marks, direction, elements) {
+            let mark;
+            let xyz;
+            // 负数-顺时针，正数-逆时针
+            let dir;
+            switch (direction) {
+                // 绕z轴顺时针
+                case 0.1:
+                case 1.2:
+                case 2.4:
+                case 3.3:
+                    mark = marks['z'];
+                    xyz = 'z';
+                    dir = -1;
+                    break;
+                // 绕z轴逆时针
+                case 0.2:
+                case 1.1:
+                case 2.3:
+                case 3.4:
+                    mark = marks['z'];
+                    xyz = 'z';
+                    dir = 1;
+                    break;
+                // 绕y轴顺时针
+                case 0.4:
+                case 1.3:
+                case 4.3:
+                case 5.4:
+                    mark = marks['y'];
+                    xyz = 'y';
+                    dir = -1;
+                    break;
+                // 绕y轴逆时针
+                case 1.4:
+                case 0.3:
+                case 4.4:
+                case 5.3:
+                    mark = marks['y'];
+                    xyz = 'y';
+                    dir = 1;
+                    break;
+                // 绕x轴顺时针
+                case 2.1:
+                case 3.2:
+                case 4.2:
+                case 5.1:
+                    mark = marks['x'];
+                    xyz = 'x';
+                    dir = -1;
+                    break;
+                // 绕x轴逆时针
+                case 2.2:
+                case 3.1:
+                case 4.1:
+                case 5.2:
+                    mark = marks['x'];
+                    xyz = 'x';
+                    dir = 1;
+                    break;
+                default:
+                    break;
+            }
+
+            console.log(xyz, dir, mark);
+            let meshGroup = elements.filter(e => e.userData.rotationMark[xyz] === mark);
+            groupRotation(meshGroup, xyz, dir);
+        }
+
+        /**
+         * 旋转 group
+         */
+        function groupRotation(meshGroup, xyz, dir) {
+            rotationGroup = new THREE.Group();
+            for (let mesh of meshGroup) {
+                if (dir % 2 === 0) {
+                    let d = dir / 2;
+                    updateFacelet(mesh, xyz, d);
+                    updateFacelet(mesh, xyz, d);
+                } else {
+                    updateFacelet(mesh, xyz, dir);
+                }
+                rotationGroup.add(mesh);
+            }
+            scene.add(rotationGroup);
+
+            rotating = true;
+            const line = getAroundLine(xyz);
+            startQuat = rotationGroup.quaternion.clone();
+            // 绕旋转轴90度
+            endQuat = new THREE.Quaternion().setFromAxisAngle(line, dir * Math.PI / 2).multiply(startQuat);
+
+            requestAnimationFrame(animateRotation);
+        }
+
+        /**
+         * 旋转动画
+         */
+        function animateRotation(time) {
+            // 根据动画时间计算插帧，范围[0~1]
+            const t = Math.min((time - startTime) / duration, 1);
+            if (rotating) {
+                rotationGroup.quaternion.slerpQuaternions(startQuat, endQuat, t);
+                if (t >= 1) {
+                    // cube.attach 后 rotationGroup.children 会减少，所以拷贝一份遍历
+                    let group = [...rotationGroup.children];
+                    for (let mesh of group) {
+                        // attach 可以保持视觉位置不变，add 会跳变
+                        // attach 会改变坐标，所以先执行，再更新坐标
+                        CUBE.attach(mesh);
+
+                        const worldPosition = new THREE.Vector3();
+                        mesh.getWorldPosition(worldPosition);
+                        // 旋转后的世界坐标是小数，需要取整处理
+                        let position = fixWorldNormal(worldPosition);
+                        mesh.position.set(position.x, position.y, position.z);
+
+                        setCubeMark(mesh, false);
+                    }
+
+                    scene.remove(rotationGroup);
+
+                    // 动画结束后，重置变量
+                    rotating = false;
+                    startTime = 0;
+                    direction = null;
+                    group = null;
+                    rotationGroup = null;
+                    startQuat = null;
+                    endQuat = null;
+
+                    return;
+                }
+            }
+            requestAnimationFrame(animateRotation);
+        }
+
+        /**
+         * 获取旋转轴
+         */
+        function getAroundLine(xyz) {
+            switch (xyz) {
+                case 'x': return XLine;
+                case 'y': return YLine;
+                case 'z': return ZLine;
+                default: return null;
+            }
+        }
+
+        /**
+         * 修正世界坐标，取整
+         */
+        function fixWorldNormal(worldNormal) {
+            if (Math.abs(worldNormal.x) < 0.0001) worldNormal.x = 0;
+            if (Math.abs(worldNormal.y) < 0.0001) worldNormal.y = 0;
+            if (Math.abs(worldNormal.z) < 0.0001) worldNormal.z = 0;
+
+            worldNormal.x = autoRound(worldNormal.x);
+            worldNormal.y = autoRound(worldNormal.y);
+            worldNormal.z = autoRound(worldNormal.z);
+
+            return worldNormal;
+        }
+
+        /**
+         * 四舍五入
+         * 如果是整数，返回整数，否则保留一位小数
+         */
+        function autoRound(num) {
+            // 先四舍五入到 1 位小数
+            const rounded = Number(num.toFixed(1));
+            // 如果是整数，返回整数，否则保留一位小数
+            return rounded % 1 === 0 ? Math.round(rounded) : rounded;
+        }
+
+        /**
+         * 随机旋转
+         */
+        function randomRotate() {
+            if (rotating || interval) return;
+
+            if (N === 3) {
+                const scramble = Cube.scramble();
+                parseCommand(scramble);
+            } else {
+                const keys = Array.from(COMMAND_MAP.keys());
+                const result = [];
+
+                for (let i = 0; i < 20; i++) {
+                    const randomIndex = Math.floor(Math.random() * keys.length);
+                    result.push(keys[randomIndex]);
+                }
+
+                parseCommand(result.join(' '));
+            }
+        }
+
+        /**
+         * 解析魔方转动指令
+         */
+        function parseCommand(commands) {
+            if (!commands) return;
+            if (rotating || interval) return;
+
+            console.log(commands);
+            // 解析命令 => 层 + 旋转方向 + 旋转轴
+            let count = 0;
+            let commandsArray = commands.split(' ');
+            interval = setInterval(() => {
+                let command = commandsArray[count];
+                count++;
+
+                let num = 1;
+                // 如果指令需要操作两次
+                if (command[command.length - 1] === '2') {
+                    command = command.slice(0, -1);
+                    num = 2;
+                }
+
+                if (COMMAND_MAP.has(command)) {
+                    let commandInfo = COMMAND_MAP.get(command);
+                    let meshGroup = CUBE.children.filter(e => e.userData.rotationMark[commandInfo.xyz] === commandInfo.mark);
+                    startTime = performance.now();
+                    groupRotation(meshGroup, commandInfo.xyz, commandInfo.dir * num);
+                } else {
+                    console.error("can not parse: " + command);
+                }
+
+                if (count >= commandsArray.length) {
+                    clearInterval(interval);
+                    interval = null;
+                }
+                // 旋转太快 mesh 会重叠，必须大于 duration 
+            }, duration + 100);
+        }
+
+        /**
+         * 重置魔方
+         * 根据平面图读取魔方状态
+         * 调用 cubeJs 算法库，解析指令还原魔方
+            |************|
+            |*U1**U2**U3*|
+            |************|
+            |*U4**U5**U6*|
+            |************|
+            |*U7**U8**U9*|
+            |************|
+        ************|************|************|************
+        *L1**L2**L3*|*F1**F2**F3*|*R1**R2**R3*|*B1**B2**B3*
+        ************|************|************|************
+        *L4**L5**L6*|*F4**F5**F6*|*R4**R5**R6*|*B4**B5**B6*
+        ************|************|************|************
+        *L7**L8**L9*|*F7**F8**F9*|*R7**R8**R9*|*B7**B8**B9*
+        ************|************|************|************
+            |************|
+            |*D1**D2**D3*|
+            |************|
+            |*D4**D5**D6*|
+            |************|
+            |*D7**D8**D9*|
+            |************|
+         */
+        function resetCube() {
+            if (N !== 3) {
+                console.log("only support 3x3x3 cube");
+                return;
+            }
+            if (rotating || interval) return;
+
+            let U_meshGroup = [];
+            let R_meshGroup = [];
+            let F_meshGroup = [];
+            let D_meshGroup = [];
+            let L_meshGroup = [];
+            let B_meshGroup = [];
+            for (let mesh of CUBE.children) {
+                if (mesh.position.y === LEN) {
+                    U_meshGroup.push(mesh);
+                }
+                if (mesh.position.x === LEN) {
+                    R_meshGroup.push(mesh);
+                }
+                if (mesh.position.z === LEN) {
+                    F_meshGroup.push(mesh);
+                }
+                if (mesh.position.y === -LEN) {
+                    D_meshGroup.push(mesh);
+                }
+                if (mesh.position.x === -LEN) {
+                    L_meshGroup.push(mesh);
+                }
+                if (mesh.position.z === -LEN) {
+                    B_meshGroup.push(mesh);
+                }
+            }
+
+            // z 从小到大
+            // z 相同，x 从小到大
+            U_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.z - b.position.z) > 0) {
+                    return a.position.z - b.position.z;
+                } else {
+                    return a.position.x - b.position.x;
+                }
+            });
+            // y 从大到小
+            // y 相同，z 从大到小
+            R_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.y - b.position.y) > 0) {
+                    return b.position.y - a.position.y;
+                } else {
+                    return b.position.z - a.position.z;
+                }
+            });
+            // y 从大到小
+            // y 相同，x 从小到大
+            F_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.y - b.position.y) > 0) {
+                    return b.position.y - a.position.y;
+                } else {
+                    return a.position.x - b.position.x;
+                }
+            });
+            // z 从大到小
+            // z 相同，x 从小到大
+            D_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.z - b.position.z) > 0) {
+                    return b.position.z - a.position.z;
+                } else {
+                    return a.position.x - b.position.x;
+                }
+            });
+            // y 从大到小
+            // y 相同，z 从小到大
+            L_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.y - b.position.y) > 0) {
+                    return b.position.y - a.position.y;
+                } else {
+                    return a.position.z - b.position.z;
+                }
+            });
+            // y 从大到小
+            // y 相同，x 从大到小
+            B_meshGroup.sort((a, b) => {
+                if (Math.abs(a.position.y - b.position.y) > 0) {
+                    return b.position.y - a.position.y;
+                } else {
+                    return b.position.x - a.position.x;
+                }
+            });
+
+            let seq = [...U_meshGroup.map(mesh => mesh.userData.facelet['y']), ...R_meshGroup.map(mesh => mesh.userData.facelet['x']),
+            ...F_meshGroup.map(mesh => mesh.userData.facelet['z']), ...D_meshGroup.map(mesh => mesh.userData.facelet['y']),
+            ...L_meshGroup.map(mesh => mesh.userData.facelet['x']), ...B_meshGroup.map(mesh => mesh.userData.facelet['z'])].join('');
+
+            console.log(seq);
+
+            const cubeJs = Cube.fromString(seq);
+            // 求解
+            const solution = cubeJs.solve();
+            parseCommand(solution);
+        }
+
+        function onMouseDown(event) {
+            if (!rotating && !interval) {
+                startDrag.x = (event.clientX / canvas.clientWidth) * 2 - 1;
+                startDrag.y = - (event.clientY / canvas.clientHeight) * 2 + 1;
+
+                raycaster.setFromCamera(startDrag, camera);
+                const intersections = raycaster.intersectObjects(CUBE.children, true);
+                if (intersections.length > 0) {
+                    controls.enabled = false;
+
+                    startPoint = intersections[0].point;
+                    selectMesh = intersections[0].object;
+                    console.log(intersections[0].object.position);
+                    console.log(selectMesh.userData.rotationMark);
+                    console.log(selectMesh.userData.facelet);
+
+                    // 因为 mesh 的坐标变化后，raycaster 获取到的法向量还是原来的，所以通过世界坐标获取法向量
+                    // 计算法线矩阵：从局部 -> 世界
+                    const normalMatrix = new THREE.Matrix3().getNormalMatrix(intersections[0].object.matrixWorld);
+                    // 转换局部法向量坐标到世界坐标
+                    const worldNormal = intersections[0].face.normal.clone().applyMatrix3(normalMatrix).normalize();
+                    normalize = fixWorldNormal(worldNormal);
+                } else {
+                    controls.enabled = true;
+                }
+            }
+        }
+
+        function onMouseMove(event) {
+            if (startDrag.x !== 0 && startDrag.x !== -100000) {
+                endDrag.x = (event.clientX / canvas.clientWidth) * 2 - 1;
+                endDrag.y = - (event.clientY / canvas.clientHeight) * 2 + 1;
+
+                raycaster.setFromCamera(endDrag, camera);
+                const intersections = raycaster.intersectObjects(CUBE.children, true);
+                if (intersections.length > 0) {
+                    endPoint = intersections[0].point;
+                    if (normalize && !startPoint.equals(endPoint)) {
+                        let sub = endPoint.sub(startPoint);
+                        direction = getDirection(sub);
+                        console.log(direction);
+                    }
+                }
+            }
+        }
+
+        function onMouseUp() {
+            if (!rotating && direction) {
+                startTime = performance.now();
+                findWhichOperation(selectMesh.userData.rotationMark, direction, CUBE.children);
+            }
+            // 对于触屏，不像鼠标总是能有一个位置坐标，
+            // 如果用户不在触摸屏幕，我们希望停止拾取操作。
+            // 因此，我们选取一个特别的值，表明什么都没选中
+            startDrag.x = -100000;
+            startDrag.y = -100000;
+            endDrag.x = -100000;
+            endDrag.y = -100000;
+
+            selectMesh = null;
+            normalize = null;
+            direction = null;
+
+            controls.enabled = true;
+        }
+
+        window.addEventListener('mousedown', onMouseDown);
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+        window.addEventListener('touchstart', (event) => {
+            // 阻止窗口滚动行为
+            event.preventDefault();
+            onMouseDown(event.touches[0]);
+        }, { passive: false });
+        window.addEventListener('touchmove', (event) => {
+            onMouseMove(event.touches[0]);
+        });
+        window.addEventListener('touchend', onMouseUp);
+
+    </script>
+</body>
+
+</html>
