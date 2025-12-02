@@ -1,4 +1,4 @@
-# Simple Rubik's Cube Demo
+# Simple Rubik's Cube
 
 使用 Three.js 编写的极简 3D 魔方
 
