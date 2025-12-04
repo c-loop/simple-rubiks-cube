@@ -521,7 +521,7 @@
                     let group = [...rotationGroup.children];
                     for (let mesh of group) {
                         // attach 可以保持视觉位置不变，add 会跳变
-                        // attach 会改变坐标，所以先执行，再更新坐标
+                        // 精度误差可能会改变坐标，所以先 attach，再更新坐标
                         CUBE.attach(mesh);
 
                         const worldPosition = new THREE.Vector3();
